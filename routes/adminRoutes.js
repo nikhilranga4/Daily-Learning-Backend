@@ -10,11 +10,15 @@ const {
 } = require('../controllers/userApprovalController');
 
 const {
-  createTopic,
-  getAllTopics,
-  updateTopic,
-  deleteTopic,
-} = require('../controllers/dailyTopicController');
+  getDailyTopics,
+  addDailyTopic,
+  deleteDailyTopic,
+  updateDailyTopic,
+  getDailyKnowledge,
+  addDailyKnowledge,
+  updateDailyKnowledge,
+  deleteDailyKnowledge,
+} = require('../controllers/adminController');
 
 const {
   createLanguage,
@@ -32,16 +36,28 @@ const {
 const { isAuthenticated, isAdmin } = require('../middleware/authMiddleware');
 
 // 🧠 Programming Language CRUD
+// Allow all authenticated users to view languages
+router.get('/languages', isAuthenticated, getLanguages);
+// Restrict write operations to admins only
 router.post('/languages', isAuthenticated, isAdmin, createLanguage);
-router.get('/languages', isAuthenticated, isAdmin, getLanguages);
 router.put('/languages/:id', isAuthenticated, isAdmin, updateLanguage);
 router.delete('/languages/:id', isAuthenticated, isAdmin, deleteLanguage);
 
 // 🗓️ Daily Topic CRUD
-router.post('/topics', isAuthenticated, isAdmin, createTopic);
-router.get('/topics', isAuthenticated, isAdmin, getAllTopics);
-router.put('/topics/:id', isAuthenticated, isAdmin, updateTopic);
-router.delete('/topics/:id', isAuthenticated, isAdmin, deleteTopic);
+router.route('/daily-topics')
+  .post(isAuthenticated, isAdmin, addDailyTopic)
+  .get(isAuthenticated, isAdmin, getDailyTopics);
+
+router.put('/daily-topics/:id', isAuthenticated, isAdmin, updateDailyTopic);
+router.delete('/daily-topics/:id', isAuthenticated, isAdmin, deleteDailyTopic);
+
+// 📚 Daily Knowledge CRUD
+router.route('/daily-knowledge')
+  .post(isAuthenticated, isAdmin, addDailyKnowledge)
+  .get(isAuthenticated, isAdmin, getDailyKnowledge);
+
+router.put('/daily-knowledge/:id', isAuthenticated, isAdmin, updateDailyKnowledge);
+router.delete('/daily-knowledge/:id', isAuthenticated, isAdmin, deleteDailyKnowledge);
 
 // 👨‍🎓 User Approvals
 router.get('/users/pending', isAuthenticated, isAdmin, getPendingUsers);

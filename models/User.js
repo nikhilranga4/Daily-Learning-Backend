@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const userSchema = new mongoose.Schema(
   {
     email: { type: String, required: true, unique: true },
+    name: { type: String, default: function() { return this.email.split('@')[0]; } },
     password: { type: String },
     authProvider: {
       type: String,
@@ -16,6 +17,7 @@ const userSchema = new mongoose.Schema(
       default: 'pending',
     },
     isAdmin: { type: Boolean, default: false },
+    profilePicture: { type: String, default: null },
   },
   { timestamps: true }
 );

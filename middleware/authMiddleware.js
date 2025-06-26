@@ -26,7 +26,7 @@ exports.isAuthenticated = async (req, res, next) => {
 exports.isAdmin = (req, res, next) => {
   if (
     req.user &&
-    (req.user.email === 'nikhilnga43@mail.com' || req.user.isAdmin)
+    (req.user.email === 'nikhilranga43@mail.com' || req.user.isAdmin)
   ) {
     next();
   } else {

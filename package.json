@@ -4,7 +4,9 @@
   "main": "index.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "auth-google": "node scripts/authGoogle.js",
+    "refresh-tokens": "node scripts/refreshTokens.js"
   },
   "keywords": [],
   "author": "",
@@ -14,13 +16,16 @@
     "axios": "^1.10.0",
     "bcrypt": "^6.0.0",
     "bcryptjs": "^3.0.2",
+    "connect-mongo": "^5.1.0",
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",
-    "express": "^5.1.0",
+    "express": "^4.18.2",
     "express-session": "^1.18.1",
+    "googleapis": "^150.0.1",
     "jsonwebtoken": "^9.0.2",
     "mongodb": "^6.17.0",
     "mongoose": "^8.16.0",
+    "multer": "^2.0.1",
     "node-cron": "^4.1.1",
     "nodemailer": "^7.0.3",
     "passport": "^0.7.0",
