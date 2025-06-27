@@ -2,13 +2,17 @@
 const express = require('express');
 const passport = require('passport');
 const jwt = require('jsonwebtoken');
-const { register, login } = require('../controllers/authController');
+const { register, login, getProfile } = require('../controllers/authController');
+const { isAuthenticated } = require('../middleware/authMiddleware');
 
 const router = express.Router();
 
 // Local Register/Login
 router.post('/register', register);
 router.post('/login', login);
+
+// Get user profile (protected route)
+router.get('/profile', isAuthenticated, getProfile);
 
 // Google Auth Start
 router.get('/google',

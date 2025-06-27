@@ -78,3 +78,30 @@ exports.login = async (req, res) => {
     res.status(500).json({ msg: 'Server error' });
   }
 };
+
+// Get user profile
+exports.getProfile = async (req, res) => {
+  try {
+    // User is already attached to req by the auth middleware
+    const user = await User.findById(req.user._id).select('-password');
+
+    if (!user) {
+      return res.status(404).json({ msg: 'User not found' });
+    }
+
+    res.json({
+      success: true,
+      user: {
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+        approval_status: user.approval_status,
+        isAdmin: user.isAdmin,
+        createdAt: user.createdAt
+      }
+    });
+  } catch (error) {
+    console.error('Get profile error:', error);
+    res.status(500).json({ msg: 'Server error' });
+  }
+};
