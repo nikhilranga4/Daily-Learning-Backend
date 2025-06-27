@@ -16,8 +16,23 @@ require('./config/passport');
 const app = express();
 
 // CORS setup
+const allowedOrigins = [
+  'http://localhost:5173',
+  process.env.FRONTEND_URL
+].filter(Boolean);
+
 app.use(cors({
-  origin: 'http://localhost:5173'||process.env.FRONTEND_URL,
+  origin: (origin, callback) => {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    
+    const msg = `The CORS policy for this site does not allow access from ${origin}`;
+    return callback(new Error(msg), false);
+  },
   credentials: true
 }));
 
@@ -109,7 +124,7 @@ function generatePreciseResponse(userInput, originalInput) {
   }
 
   if (userInput.includes('code') || userInput.includes('program')) {
-    return `**Technical Analysis: Code Request Detected**\n\n**Optimal coding approach:**\n\n\`\`\`javascript\n// Precise, efficient implementation\nclass PreciseAssistant {\n  constructor() {\n    this.accuracy = 99.9;\n    this.responseTime = 'optimized';\n  }\n  \n  processQuery(input) {\n    // Validate input\n    if (!input || typeof input !== 'string') {\n      throw new Error('Invalid input parameter');\n    }\n    \n    // Process with precision\n    return {\n      result: input.trim().toLowerCase(),\n      confidence: this.accuracy,\n      timestamp: Date.now()\n    };\n  }\n}\n\n// Usage example\nconst assistant = new PreciseAssistant();\nconst result = assistant.processQuery('${originalInput}');\nconsole.log(result);\n\`\`\`\n\n**Key characteristics:**\n- Error handling implemented\n- Type validation included\n- Performance optimized\n- Documentation complete`;
+    return `**Technical Analysis: Code Request Detected**\n\n**Optimal coding approach:**\n\n\`\`\`javascript\n// Precise, efficient implementation\nclass PreciseAssistant {\n  constructor() {\n    this.accuracy = 99.9;\n    this.responseTime = 'optimized';\n  }\n  \n  processQuery(input) {\n    // Validate input\n    if (!input || typeof input !== 'string') {\n      throw new Error('Invalid input parameter');\n    }\n    \n    // Process with precision\n    return {\n      result: input.trim().toLowerCase(),\n      confidence: this.accuracy,\n      timestamp: Date.now()\n    };\n  }\n}\n\n// Usage example\nconst assistant = new PreciseAssistant();\nconst result = assistant.processQuery('${originalInput}');\nconsole.log(result);\n\`\`\`\n\n**Key characteristics:**\n- ✅ Modular design\n- ✅ Async/await support\n- ✅ Error handling ready\n- ✅ Extensible architecture\n\nNeed help with a specific programming concept or problem? Just ask! 🚀`;
   }
 
   return `**Precise Analysis Complete**\n\n**Input received:** "${originalInput}"\n**Processing status:** Successful\n**Response type:** Factual\n\n**Analysis results:**\n- Character count: ${originalInput.length}\n- Word count: ${originalInput.split(' ').length}\n- Classification: User query\n\n**Technical specifications:**\n- Model: Precise AI Assistant\n- Temperature: 0.1\n- Max tokens: 4000\n- Response accuracy: High\n\n**Recommended actions:**\n1. Provide specific, factual information\n2. Minimize ambiguity\n3. Include relevant technical details\n4. Maintain professional tone\n\n**Status:** Ready for next query`;
