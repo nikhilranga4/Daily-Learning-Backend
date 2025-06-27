@@ -70,9 +70,9 @@ router.put('/read/:messageId', auth.isAuthenticated, chatController.markMessageA
 // @access  Private
 router.delete('/message/:messageId', auth.isAuthenticated, chatController.deleteMessage);
 
-// @route   GET /api/chat/image/:fileId
-// @desc    Proxy Google Drive images to handle CORS
-// @access  Private
-router.get('/image/:fileId', auth.isAuthenticated, chatController.getGoogleDriveImage);
+// Route to get a MEGA file by its node ID (proxied through the backend)
+// This route is intentionally not authenticated. Browsers do not send auth headers
+// for <img> src attributes. Security is maintained because the nodeId is unguessable.
+router.get('/mega-file/:nodeId', chatController.getMegaFile);
 
 module.exports = router;

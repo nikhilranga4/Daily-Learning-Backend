@@ -39,7 +39,11 @@ const chatMessageSchema = new mongoose.Schema({
     type: String,
     default: null
   },
-  googleDriveFileId: {
+  megaFileHandle: {
+    type: String,
+    default: null
+  },
+  localFilePath: {
     type: String,
     default: null
   },

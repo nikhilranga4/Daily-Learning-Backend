@@ -1,8 +1,10 @@
 // controllers/chatController.js
 const ChatMessage = require('../models/ChatMessage');
 const User = require('../models/User');
-const googleDriveService = require('../services/googleDriveService');
+const megaService = require('../services/megaService');
 const { Readable } = require('stream');
+const path = require('path');
+const fs = require('fs');
 
 // Send a message
 const sendMessage = async (req, res) => {
@@ -29,57 +31,47 @@ const sendMessage = async (req, res) => {
       try {
         console.log('📎 Processing file upload:', req.file.originalname);
 
-        // Try Google Drive first, fallback to local storage
+        // Try MEGA first, fallback to local storage
         let uploadResult;
-
         try {
-          // Get chat files folder
-          const folderId = await googleDriveService.getChatFilesFolder();
-
-          // Upload to Google Drive using buffer directly
-          uploadResult = await googleDriveService.uploadFile(
-            req.file.buffer,
-            `${Date.now()}_${req.file.originalname}`,
-            req.file.mimetype,
-            folderId
-          );
-
-          console.log('✅ File uploaded to Google Drive:', uploadResult.fileId);
-
-          // Update message data with Google Drive info
-          const isImage = req.file.mimetype.startsWith('image/');
-          messageData.messageType = isImage ? 'image' : 'file';
-          messageData.fileUrl = isImage ? uploadResult.imagePreviewUrl : uploadResult.downloadUrl;
-          messageData.fileName = req.file.originalname;
-          messageData.fileSize = req.file.size;
-          messageData.fileMimeType = req.file.mimetype;
-          messageData.googleDriveFileId = uploadResult.fileId;
-          // For file uploads, only keep message if it's different from filename
-          messageData.message = (message && message !== req.file.originalname) ? message : '';
-
-        } catch (driveError) {
-          console.log('⚠️ Google Drive upload failed, using local storage fallback');
-          console.log('📁 Storing file locally...');
-
-          // Fallback to local file storage
-          const fs = require('fs');
-          const path = require('path');
-
-          // Create uploads directory if it doesn't exist
+          // Save file temporarily
           const uploadsDir = path.join(__dirname, '../uploads/chat-files');
           if (!fs.existsSync(uploadsDir)) {
             fs.mkdirSync(uploadsDir, { recursive: true });
           }
+          const uniqueFileName = `${Date.now()}_${req.file.originalname}`;
+          const tempFilePath = path.join(uploadsDir, uniqueFileName);
+          fs.writeFileSync(tempFilePath, req.file.buffer);
 
-          // Generate unique filename
+          // Upload to MEGA and get the file node handle
+          const megaUploadResult = await megaService.uploadFile(tempFilePath, uniqueFileName);
+
+          // Optionally, delete the temp file after upload
+          fs.unlinkSync(tempFilePath);
+
+          // Update message data with MEGA info
+          const isImage = req.file.mimetype.startsWith('image/');
+          messageData.messageType = isImage ? 'image' : 'file';
+          // Construct a URL to our own backend proxy, which is essential for previews
+          messageData.fileUrl = `${process.env.SERVER_URL}/api/chat/mega-file/${megaUploadResult.nodeId}`;
+          console.log('✅ Generated Proxy URL for Frontend:', messageData.fileUrl);
+          messageData.fileName = req.file.originalname;
+          messageData.fileSize = req.file.size;
+          messageData.fileMimeType = req.file.mimetype;
+          messageData.megaFileHandle = megaUploadResult && megaUploadResult.nodeId ? megaUploadResult.nodeId : null;
+          // For file uploads, only keep message if it's different from filename
+          messageData.message = (message && message !== req.file.originalname) ? message : '';
+        } catch (uploadError) {
+          console.error('❌ MEGA upload error, falling back to local storage:', uploadError);
+          // Fallback to local file storage
+          const uploadsDir = path.join(__dirname, '../uploads/chat-files');
+          if (!fs.existsSync(uploadsDir)) {
+            fs.mkdirSync(uploadsDir, { recursive: true });
+          }
           const uniqueFileName = `${Date.now()}_${req.file.originalname}`;
           const filePath = path.join(uploadsDir, uniqueFileName);
-
-          // Save file to local storage
           fs.writeFileSync(filePath, req.file.buffer);
-
           console.log('✅ File stored locally:', uniqueFileName);
-
           // Update message data with local file info
           messageData.messageType = req.file.mimetype.startsWith('image/') ? 'image' : 'file';
           messageData.fileUrl = `${process.env.SERVER_URL}/uploads/chat-files/${uniqueFileName}`;
@@ -265,12 +257,21 @@ const deleteMessage = async (req, res) => {
       return res.status(404).json({ msg: 'Message not found or unauthorized' });
     }
 
-    // If message has a file, delete from Google Drive
-    if (message.googleDriveFileId) {
+    // If message has a MEGA file, delete it from MEGA
+    if (message.megaFileHandle) {
       try {
-        await googleDriveService.deleteFile(message.googleDriveFileId);
+        await megaService.deleteFile(message.megaFileHandle);
       } catch (fileError) {
-        console.error('Error deleting file from Google Drive:', fileError);
+        console.error('Error deleting file from MEGA:', fileError);
+      }
+    }
+
+    // If message used local file storage, optionally delete local file
+    if (message.localFilePath && fs.existsSync(message.localFilePath)) {
+      try {
+        fs.unlinkSync(message.localFilePath);
+      } catch (fileError) {
+        console.error('Error deleting local file:', fileError);
       }
     }
 
@@ -289,27 +290,48 @@ const deleteMessage = async (req, res) => {
   }
 };
 
-// Get Google Drive image with proper headers
-const getGoogleDriveImage = async (req, res) => {
+// Get MEGA file
+const getMegaFile = async (req, res) => {
+  const { nodeId } = req.params;
+  console.log(`
+--- 🖼️  Image Preview Request Received ---`);
+  console.log(`Node ID: ${nodeId}`);
+
+  if (!nodeId) {
+    console.error('❌ Error: Node ID is missing.');
+    return res.status(400).json({ message: 'Node ID is required.' });
+  }
+
   try {
-    const { fileId } = req.params;
+    // Find the message to get the mime type, which helps the browser render it correctly.
+    const message = await ChatMessage.findOne({ megaFileHandle: nodeId });
 
-    // Redirect to Google Drive image URL with proper headers
-    const imageUrl = `https://drive.google.com/uc?id=${fileId}`;
+    if (message && message.fileMimeType) {
+      console.log(`📄 Found message. Setting Content-Type to: ${message.fileMimeType}`);
+      res.setHeader('Content-Type', message.fileMimeType);
+    } else {
+      console.warn(`⚠️ Warning: Could not find message for node ${nodeId}. Falling back to generic 'application/octet-stream'.`);
+      res.setHeader('Content-Type', 'application/octet-stream');
+    }
 
-    // Set CORS headers
-    res.set({
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET',
-      'Access-Control-Allow-Headers': 'Content-Type',
+    console.log('☁️  Requesting file stream from MEGA...');
+    const megaStream = await megaService.downloadFileAsStream(nodeId);
+    console.log('✅ Received stream from MEGA. Piping to response...');
+
+    megaStream.on('error', (error) => {
+      console.error(`❌❌❌ MEGA Stream Error for node ${nodeId}:`, error);
+      if (!res.headersSent) {
+        res.status(500).json({ message: 'Failed to stream file from MEGA.' });
+      }
     });
 
-    // Redirect to the Google Drive image
-    res.redirect(imageUrl);
+    megaStream.pipe(res);
 
   } catch (error) {
-    console.error('Error proxying Google Drive image:', error);
-    res.status(500).json({ msg: 'Failed to load image' });
+    console.error(`❌❌❌ Controller Error in getMegaFile for node ${nodeId}:`, error);
+    if (!res.headersSent) {
+      res.status(500).json({ message: 'Server error while fetching MEGA file.' });
+    }
   }
 };
 
@@ -320,5 +342,5 @@ module.exports = {
   getAllUsers,
   markMessageAsRead,
   deleteMessage,
-  getGoogleDriveImage
+  getMegaFile
 };
