@@ -3,6 +3,30 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const sendAdminNotification = require('../utils/sendAdminNotification');
+const passport = require('passport');
+const GitHubStrategy = require('passport-github2').Strategy;
+const GoogleStrategy = require('passport-google-oauth20').Strategy;
+
+passport.use(new GitHubStrategy({
+  clientID: process.env.GITHUB_CLIENT_ID,
+  clientSecret: process.env.GITHUB_CLIENT_SECRET,
+  callbackURL: `${process.env.GITHUB_CALLBACK_URL}/auth/github/callback`,
+  scope: ['user:email']
+},
+async (accessToken, refreshToken, profile, done) => {
+  // Your auth logic here
+}));
+
+// Google Strategy Configuration
+passport.use(new GoogleStrategy({
+  clientID: process.env.GOOGLE_CLIENT_ID,
+  clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+  callbackURL: `${process.env.GOOGLE_CALLBACK_URL}/auth/google/callback`,
+  scope: ['profile', 'email']
+},
+async (accessToken, refreshToken, profile, done) => {
+  // Your auth logic here
+}));
 
 exports.register = async (req, res) => {
   const { email, password } = req.body;
