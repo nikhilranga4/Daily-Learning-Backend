@@ -1,7 +1,7 @@
 // controllers/llmChatController.js
 const llmChatService = require('../services/llmChatService');
+const llmConfigService = require('../services/llmConfigService');
 const LLMConversation = require('../models/LLMConversation');
-const LLMModel = require('../models/LLMModel');
 const mongoose = require('mongoose');
 
 // Get available LLM models for users
@@ -368,17 +368,7 @@ const validateModel = async (req, res) => {
 
     console.log(`🔍 Validating model: ${modelId}`);
 
-    // Check if modelId is a valid ObjectId format
-    if (!mongoose.Types.ObjectId.isValid(modelId)) {
-      console.error(`❌ Invalid ObjectId format: ${modelId}`);
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid model ID format',
-        modelId,
-      });
-    }
-
-    const model = await LLMModel.findById(modelId);
+    const model = llmConfigService.getModelById(modelId);
 
     if (!model) {
       console.error(`❌ Model not found: ${modelId}`);
@@ -389,12 +379,21 @@ const validateModel = async (req, res) => {
       });
     }
 
+    if (!model.isActive) {
+      console.error(`❌ Model inactive: ${model.displayName}`);
+      return res.status(400).json({
+        success: false,
+        message: 'Model is not active',
+        modelId,
+      });
+    }
+
     console.log(`✅ Model validated: ${model.displayName}`);
 
     res.json({
       success: true,
       data: {
-        id: model._id,
+        id: model.id,
         name: model.name,
         displayName: model.displayName,
         provider: model.provider,
@@ -412,6 +411,44 @@ const validateModel = async (req, res) => {
   }
 };
 
+// Get public URL for a conversation
+const getConversationPublicUrl = async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const userId = req.user._id || req.user.id;
+
+    console.log(`🔗 Getting public URL for conversation: ${conversationId}`);
+
+    const publicUrl = await llmChatService.getConversationPublicUrl(conversationId, userId);
+
+    if (publicUrl) {
+      res.json({
+        success: true,
+        data: {
+          conversationId,
+          publicUrl,
+        },
+      });
+    } else {
+      res.json({
+        success: false,
+        message: 'Public URL not available for this conversation',
+        data: {
+          conversationId,
+          publicUrl: null,
+        },
+      });
+    }
+  } catch (error) {
+    console.error('Error getting conversation public URL:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get conversation public URL',
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
   getAvailableModels,
   createConversation,
@@ -424,4 +461,5 @@ module.exports = {
   getConversationHistory,
   restoreConversation,
   validateModel,
+  getConversationPublicUrl,
 };

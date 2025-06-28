@@ -1,6 +1,6 @@
 // services/llmChatService.js
 const axios = require('axios');
-const LLMModel = require('../models/LLMModel');
+const llmConfigService = require('./llmConfigService');
 const megaService = require('./megaService');
 const megaConversationService = require('./megaConversationService');
 
@@ -47,10 +47,7 @@ class LLMChatService {
 
   async getAvailableModels() {
     try {
-      const models = await LLMModel.find({ isActive: true })
-        .select('name displayName provider description isDefault')
-        .sort({ isDefault: -1, displayName: 1 });
-
+      const models = llmConfigService.getAllModelsForFrontend();
       return models;
     } catch (error) {
       console.error('Error fetching available models:', error);
@@ -65,37 +62,23 @@ class LLMChatService {
       // If no modelId provided, try to get the default model
       if (!modelId || modelId === '') {
         console.log('🔍 No modelId provided, looking for default model');
-        const defaultModel = await LLMModel.findOne({ isActive: true, isDefault: true });
+        const defaultModel = llmConfigService.getDefaultModel();
         if (!defaultModel) {
-          console.log('🔍 No default model, looking for any active model');
-          const anyActiveModel = await LLMModel.findOne({ isActive: true });
-          if (!anyActiveModel) {
-            throw new Error('No active LLM models available. Please contact administrator.');
-          }
-          modelId = anyActiveModel._id.toString();
-          console.log(`✅ Using first active model: ${anyActiveModel.displayName}`);
-        } else {
-          modelId = defaultModel._id.toString();
-          console.log(`✅ Using default model: ${defaultModel.displayName}`);
+          throw new Error('No active LLM models available. Please contact administrator.');
         }
+        modelId = defaultModel.id;
+        console.log(`✅ Using default model: ${defaultModel.displayName}`);
       }
 
       // Validate the model
-      const model = await LLMModel.findById(modelId);
-      if (!model) {
-        console.error(`❌ Model not found: ${modelId}`);
-        throw new Error(`Model with ID ${modelId} not found`);
-      }
-
-      if (!model.isActive) {
-        console.error(`❌ Model inactive: ${model.displayName}`);
-        throw new Error(`Model "${model.displayName}" is not active`);
-      }
+      const model = llmConfigService.validateModel(modelId);
+      console.log(`✅ Model validated: ${model.displayName}`);
 
       console.log(`✅ Creating conversation with model: ${model.displayName}`);
 
       // Create conversation in Mega Drive instead of MongoDB
-      const conversation = await megaConversationService.createConversation(userId, modelId, title);
+      const userIdString = userId.toString();
+      const conversation = await megaConversationService.createConversation(userIdString, modelId, title);
 
       // Format for compatibility with existing code
       const formattedConversation = {
@@ -106,7 +89,7 @@ class LLMChatService {
         createdAt: conversation.createdAt,
         updatedAt: conversation.updatedAt,
         llmModelId: {
-          _id: model._id,
+          _id: model.id,
           name: model.name,
           displayName: model.displayName,
           provider: model.provider
@@ -129,27 +112,53 @@ class LLMChatService {
       let conversation;
       let actualConversationId = conversationId;
 
+      // Ensure userId is a string for consistency
+      const userIdString = userId.toString();
+
       try {
-        conversation = await megaConversationService.getConversation(conversationId, userId);
+        conversation = await megaConversationService.getConversation(conversationId, userIdString);
         console.log(`✅ Found conversation in Mega Drive: ${conversation.id}`);
       } catch (error) {
         console.log(`⚠️  Conversation not found in Mega Drive, checking MongoDB: ${error.message}`);
 
-        // Try to get from MongoDB (legacy conversations)
+        // Try to get from MongoDB (legacy conversations) - only if conversationId is a valid ObjectId
         const LLMConversation = require('../models/LLMConversation');
-        const legacyConv = await LLMConversation.findOne({
-          _id: conversationId,
-          userId,
-        }).populate('llmModelId');
+        const mongoose = require('mongoose');
+        let legacyConv = null;
+
+        if (mongoose.Types.ObjectId.isValid(conversationId)) {
+          try {
+            legacyConv = await LLMConversation.findOne({
+              _id: conversationId,
+              userId,
+            }).populate('llmModelId');
+          } catch (error) {
+            console.log(`⚠️  Failed to query MongoDB for conversation: ${error.message}`);
+          }
+        } else {
+          console.log(`⚠️  Conversation ID ${conversationId} is not a valid MongoDB ObjectId, skipping legacy lookup`);
+        }
 
         if (legacyConv) {
           console.log(`🔄 Found legacy conversation in MongoDB, migrating to Mega Drive`);
 
-          // Migrate to Mega Drive
-          const modelId = newModelId || legacyConv.llmModelId._id.toString();
+          // Find a compatible model for migration
+          let migrationModelId = newModelId;
+          if (!migrationModelId) {
+            // Try to find a model that matches the legacy model's provider
+            const legacyProvider = legacyConv.llmModelId?.provider;
+            const compatibleModel = llmConfigService.getModelsByProvider(legacyProvider)[0] ||
+                                   llmConfigService.getDefaultModel();
+            migrationModelId = compatibleModel?.id;
+          }
+
+          if (!migrationModelId) {
+            throw new Error('No compatible model found for conversation migration');
+          }
+
           conversation = await megaConversationService.createConversation(
-            userId,
-            modelId,
+            userIdString,
+            migrationModelId,
             legacyConv.title
           );
 
@@ -174,7 +183,7 @@ class LLMChatService {
 
       // Get model information
       let modelId = newModelId || conversation.modelId;
-      let model = await LLMModel.findById(modelId);
+      let model = llmConfigService.getModelById(modelId);
 
       if (!model) {
         console.error(`❌ Model not found: ${modelId}`);
@@ -186,16 +195,7 @@ class LLMChatService {
         console.log(`🔍 Attempting to switch to model: ${newModelId}`);
 
         try {
-          const newModel = await LLMModel.findById(newModelId);
-          if (!newModel) {
-            console.error(`❌ Model not found: ${newModelId}`);
-            throw new Error(`Model with ID ${newModelId} not found in database`);
-          }
-
-          if (!newModel.isActive) {
-            console.error(`❌ Model inactive: ${newModel.displayName}`);
-            throw new Error(`Model "${newModel.displayName}" is not active`);
-          }
+          const newModel = llmConfigService.validateModel(newModelId);
 
           // Update conversation to use new model
           conversation.modelId = newModelId;
@@ -207,12 +207,12 @@ class LLMChatService {
           console.error(`❌ Model validation failed:`, error.message);
 
           // Try to fall back to default model
-          const fallbackModel = await LLMModel.findOne({ isDefault: true, isActive: true });
-          if (fallbackModel && fallbackModel._id.toString() !== modelId) {
+          const fallbackModel = llmConfigService.getDefaultModel();
+          if (fallbackModel && fallbackModel.id !== modelId) {
             console.log(`🔄 Falling back to default model: ${fallbackModel.displayName}`);
-            conversation.modelId = fallbackModel._id.toString();
+            conversation.modelId = fallbackModel.id;
             model = fallbackModel;
-            modelId = fallbackModel._id.toString();
+            modelId = fallbackModel.id;
           } else {
             throw new Error(`Model validation failed: ${error.message}`);
           }
@@ -223,11 +223,11 @@ class LLMChatService {
         throw new Error('LLM model is not available');
       }
 
-      // Add user message to conversation in Mega Drive
-      await megaConversationService.addMessage(actualConversationId, 'user', userMessage, 0);
+      // Add user message to conversation (cache only, don't save yet)
+      await megaConversationService.addMessage(actualConversationId, 'user', userMessage, 0, false);
 
       // Get updated conversation
-      const updatedConversation = await megaConversationService.getConversation(actualConversationId, userId);
+      const updatedConversation = await megaConversationService.getConversation(actualConversationId, userIdString);
 
       // Prepare messages for API call
       const messages = this.prepareMessages(updatedConversation.messages, model.systemPrompt);
@@ -239,12 +239,10 @@ class LLMChatService {
       } catch (apiError) {
         console.warn(`Primary model ${model.displayName} failed:`, apiError.message);
 
-        // Try to find a fallback model
-        const fallbackModel = await LLMModel.findOne({
-          _id: { $ne: model._id },
-          isActive: true,
-          provider: { $in: ['custom'] } // Prefer mock/custom models as fallback
-        });
+        // Try to find a fallback model (prefer OpenRouter models)
+        const openrouterModels = llmConfigService.getModelsByProvider('openrouter');
+        const fallbackModel = openrouterModels.find(m => m.id !== model.id) ||
+                             llmConfigService.getModelsByProvider('custom').find(m => m.id !== model.id);
 
         if (fallbackModel) {
           console.log(`🔄 Trying fallback model: ${fallbackModel.displayName}`);
@@ -252,7 +250,7 @@ class LLMChatService {
             response = await this.callLLMAPI(fallbackModel, messages);
 
             // Update conversation to use fallback model
-            conversation.modelId = fallbackModel._id.toString();
+            conversation.modelId = fallbackModel.id;
             model = fallbackModel;
 
             console.log(`✅ Successfully used fallback model: ${fallbackModel.displayName}`);
@@ -268,17 +266,14 @@ class LLMChatService {
       // Add assistant response to conversation in Mega Drive
       await megaConversationService.addMessage(actualConversationId, 'assistant', response.content, response.tokens || 0);
 
-      // Update model usage
-      model.usageCount += 1;
-      model.lastUsed = new Date();
-      await model.save();
+      // Note: Model usage tracking is no longer needed since models are environment-based
 
-      // Get final updated conversation from Mega Drive
-      const finalConversation = await megaConversationService.getConversation(actualConversationId, userId);
+      // Get final updated conversation from cache/Mega Drive
+      const finalConversation = await megaConversationService.getConversation(actualConversationId, userIdString);
 
       // Add model information for compatibility
       finalConversation.llmModelId = {
-        _id: model._id,
+        _id: model.id,
         name: model.name,
         displayName: model.displayName,
         provider: model.provider
@@ -376,9 +371,16 @@ class LLMChatService {
       console.log(`🤖 Calling ${model.provider} API:`, {
         model: model.modelId,
         messageCount: messages.length,
+        maxTokens: model.maxTokens,
+        temperature: model.temperature,
       });
 
+      console.log('📤 Request data:', JSON.stringify(requestData, null, 2));
+
       const response = await axios.post(endpoint, requestData, { headers });
+
+      console.log('📥 Response status:', response.status);
+      console.log('📥 Response data:', JSON.stringify(response.data, null, 2));
 
       // Parse response based on provider
       let content, tokens;
@@ -491,41 +493,40 @@ class LLMChatService {
   async getUserConversations(userId, page = 1, limit = 20) {
     try {
       // Get conversations from Mega Drive
-      const conversations = await megaConversationService.getUserConversations(userId, page, limit);
+      const userIdString = userId.toString();
+      const conversations = await megaConversationService.getUserConversations(userIdString, page, limit);
 
       // Enrich with model information
-      const enrichedConversations = await Promise.all(
-        conversations.map(async (conv) => {
-          try {
-            const model = await LLMModel.findById(conv.modelId);
-            if (model) {
-              return {
-                _id: conv.id,
-                title: conv.title,
-                llmModelId: {
-                  _id: model._id,
-                  name: model.name,
-                  displayName: model.displayName,
-                  provider: model.provider
-                },
-                createdAt: conv.createdAt,
-                updatedAt: conv.updatedAt,
-                lastMessageAt: conv.lastMessageAt,
-                messageCount: conv.messageCount,
-                totalTokens: conv.totalTokens,
-                isActive: conv.isActive,
-                messages: [] // Don't load full messages for list view
-              };
-            } else {
-              console.warn(`Model not found for conversation ${conv.id}: ${conv.modelId}`);
-              return null;
-            }
-          } catch (error) {
-            console.warn(`Failed to enrich conversation ${conv.id}:`, error.message);
+      const enrichedConversations = conversations.map((conv) => {
+        try {
+          const model = llmConfigService.getModelById(conv.modelId);
+          if (model) {
+            return {
+              _id: conv.id,
+              title: conv.title,
+              llmModelId: {
+                _id: model.id,
+                name: model.name,
+                displayName: model.displayName,
+                provider: model.provider
+              },
+              createdAt: conv.createdAt,
+              updatedAt: conv.updatedAt,
+              lastMessageAt: conv.lastMessageAt,
+              messageCount: conv.messageCount,
+              totalTokens: conv.totalTokens,
+              isActive: conv.isActive,
+              messages: [] // Don't load full messages for list view
+            };
+          } else {
+            console.warn(`Model not found for conversation ${conv.id}: ${conv.modelId}`);
             return null;
           }
-        })
-      );
+        } catch (error) {
+          console.warn(`Failed to enrich conversation ${conv.id}:`, error.message);
+          return null;
+        }
+      });
 
       // Filter out null entries
       return enrichedConversations.filter(conv => conv !== null);
@@ -539,13 +540,14 @@ class LLMChatService {
   async getConversation(conversationId, userId) {
     try {
       // Get conversation from Mega Drive
-      const conversation = await megaConversationService.getConversation(conversationId, userId);
+      const userIdString = userId.toString();
+      const conversation = await megaConversationService.getConversation(conversationId, userIdString);
       if (!conversation) {
         throw new Error('Conversation not found');
       }
 
       // Get model information
-      const model = await LLMModel.findById(conversation.modelId);
+      const model = llmConfigService.getModelById(conversation.modelId);
       if (!model) {
         throw new Error('Model not found for this conversation');
       }
@@ -562,7 +564,7 @@ class LLMChatService {
         totalTokens: conversation.totalTokens,
         isActive: conversation.isActive,
         llmModelId: {
-          _id: model._id,
+          _id: model.id,
           name: model.name,
           displayName: model.displayName,
           provider: model.provider
@@ -578,7 +580,8 @@ class LLMChatService {
 
   async deleteConversation(conversationId, userId) {
     try {
-      const conversation = await megaConversationService.deleteConversation(conversationId, userId);
+      const userIdString = userId.toString();
+      const conversation = await megaConversationService.deleteConversation(conversationId, userIdString);
 
       // Format for compatibility
       return {
@@ -594,10 +597,11 @@ class LLMChatService {
 
   async updateConversationTitle(conversationId, userId, newTitle) {
     try {
-      const conversation = await megaConversationService.updateConversationTitle(conversationId, userId, newTitle);
+      const userIdString = userId.toString();
+      const conversation = await megaConversationService.updateConversationTitle(conversationId, userIdString, newTitle);
 
       // Get model information for compatibility
-      const model = await LLMModel.findById(conversation.modelId);
+      const model = llmConfigService.getModelById(conversation.modelId);
 
       // Format for compatibility
       return {
@@ -605,7 +609,7 @@ class LLMChatService {
         title: conversation.title,
         updatedAt: conversation.updatedAt,
         llmModelId: model ? {
-          _id: model._id,
+          _id: model.id,
           name: model.name,
           displayName: model.displayName,
           provider: model.provider
@@ -614,6 +618,17 @@ class LLMChatService {
     } catch (error) {
       console.error('Error updating conversation title:', error);
       throw error;
+    }
+  }
+
+  async getConversationPublicUrl(conversationId, userId) {
+    try {
+      const userIdString = userId.toString();
+      const publicUrl = await megaConversationService.getConversationPublicUrl(conversationId, userIdString);
+      return publicUrl;
+    } catch (error) {
+      console.error('Error getting conversation public URL:', error);
+      throw new Error('Failed to get conversation public URL');
     }
   }
 }

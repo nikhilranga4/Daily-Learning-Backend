@@ -31,25 +31,52 @@ class MegaConversationService {
       };
 
       // Save to Mega Drive
-      const fileName = `conversation_${conversationId}.json`;
+      const fileName = `conversation_data.json`; // Standard filename for each conversation folder
       const fileContent = JSON.stringify(conversation, null, 2);
       const fileBuffer = Buffer.from(fileContent, 'utf8');
       
-      const megaFileId = await megaService.uploadBuffer(
+      // Upload to conversation-specific folder: users/userid/userdata_files/conversationid
+      const uploadResult = await megaService.uploadToConversationFolder(
         fileBuffer,
         fileName,
-        `user_${userId}/conversations`
+        userId,
+        conversationId
       );
 
-      if (megaFileId) {
-        conversation.megaFileId = megaFileId;
+      if (uploadResult && uploadResult.success) {
+        conversation.megaFileId = uploadResult.nodeId;
+        conversation.folderPath = uploadResult.folderPath;
+
+        // Check if public URL was generated during upload
+        if (uploadResult.publicUrl) {
+          conversation.publicUrl = uploadResult.publicUrl;
+          console.log(`✅ Conversation created in Mega Drive with public access: ${conversationId}`);
+          console.log(`🔗 Public URL: ${uploadResult.publicUrl}`);
+        } else {
+          console.warn('⚠️  Public URL not generated during upload');
+        }
+
+        // Log folder path information
+        if (uploadResult.fallback) {
+          console.log(`📁 Saved to: ${uploadResult.folderPath} (fallback mode)`);
+          if (uploadResult.warning) {
+            console.warn(`⚠️  ${uploadResult.warning}`);
+          }
+        } else {
+          console.log(`📁 Saved to: ${uploadResult.folderPath}`);
+        }
+
         console.log(`✅ Conversation created in Mega Drive: ${conversationId}`);
       } else {
         console.warn('⚠️  Failed to save to Mega Drive, using memory cache only');
+        conversation.fallbackMode = true;
       }
 
-      // Cache the conversation
+      // Cache the conversation immediately
       this.conversationCache.set(conversationId, conversation);
+
+      // Log cache status for debugging
+      console.log(`📋 Conversation ${conversationId} cached. Cache size: ${this.conversationCache.size}`);
 
       return conversation;
     } catch (error) {
@@ -59,18 +86,22 @@ class MegaConversationService {
   }
 
   /**
-   * Add a message to a conversation
+   * Add a message to a conversation (with optional save)
    */
-  async addMessage(conversationId, role, content, tokens = 0) {
+  async addMessage(conversationId, role, content, tokens = 0, saveToMega = true) {
     try {
       let conversation = this.conversationCache.get(conversationId);
-      
+
       if (!conversation) {
         // Try to load from Mega Drive
         conversation = await this.loadConversationFromMega(conversationId);
         if (!conversation) {
+          console.error(`❌ Conversation ${conversationId} not found in cache or Mega Drive`);
           throw new Error('Conversation not found');
         }
+        console.log(`📁 Loaded conversation ${conversationId} from Mega Drive for message addition`);
+      } else {
+        console.log(`📋 Using cached conversation ${conversationId} for message addition`);
       }
 
       const message = {
@@ -86,11 +117,28 @@ class MegaConversationService {
       conversation.lastMessageAt = message.timestamp;
       conversation.updatedAt = new Date().toISOString();
 
+      // Update conversation title with first user message content
+      if (role === 'user' && conversation.messages.length === 1) {
+        // This is the first user message, update the title
+        const titleContent = content.length > 50 ? content.substring(0, 50) + '...' : content;
+        conversation.title = titleContent;
+        console.log(`📝 Updated conversation title to: "${titleContent}"`);
+      }
+
       // Update cache
       this.conversationCache.set(conversationId, conversation);
 
-      // Save to Mega Drive
-      await this.saveConversationToMega(conversation);
+      // Save to Mega Drive (if requested and available)
+      if (saveToMega) {
+        try {
+          await this.saveConversationToMega(conversation);
+        } catch (error) {
+          console.warn('⚠️  Failed to save message to Mega Drive, keeping in memory cache:', error.message);
+          conversation.fallbackMode = true;
+        }
+      } else {
+        console.log(`📝 Message added to cache only (save skipped): ${role} message`);
+      }
 
       return conversation;
     } catch (error) {
@@ -106,24 +154,32 @@ class MegaConversationService {
     try {
       // Check cache first
       let conversation = this.conversationCache.get(conversationId);
-      
-      if (!conversation) {
-        // Load from Mega Drive
-        conversation = await this.loadConversationFromMega(conversationId, userId);
-        if (!conversation) {
-          throw new Error('Conversation not found');
+
+      if (conversation) {
+        // Verify user ownership for cached conversation
+        if (conversation.userId !== userId) {
+          throw new Error('Access denied');
         }
-        
+        console.log(`📋 Retrieved conversation from cache: ${conversationId}`);
+        return conversation;
+      }
+
+      // Try to load from Mega Drive
+      conversation = await this.loadConversationFromMega(conversationId, userId);
+      if (conversation) {
+        // Verify user ownership
+        if (conversation.userId !== userId) {
+          throw new Error('Access denied');
+        }
+
         // Cache it
         this.conversationCache.set(conversationId, conversation);
+        console.log(`📁 Retrieved conversation from Mega Drive: ${conversationId}`);
+        return conversation;
       }
 
-      // Verify user ownership
-      if (conversation.userId !== userId) {
-        throw new Error('Access denied');
-      }
-
-      return conversation;
+      // If not found anywhere, throw error
+      throw new Error('Conversation not found');
     } catch (error) {
       console.error('Error getting conversation:', error);
       throw error;
@@ -135,41 +191,50 @@ class MegaConversationService {
    */
   async getUserConversations(userId, page = 1, limit = 20) {
     try {
-      // Get list of conversation files from Mega Drive
-      const files = await megaService.listFiles(`user_${userId}/conversations`);
-      
-      if (!files || files.length === 0) {
+      // Get list of conversation folders from user-specific folder
+      const conversationFolders = await megaService.listUserConversations(userId);
+
+      if (!conversationFolders || conversationFolders.length === 0) {
         return [];
       }
 
-      // Sort by creation date (newest first)
-      const sortedFiles = files
-        .filter(file => file.name.startsWith('conversation_') && file.name.endsWith('.json'))
-        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      // Sort by timestamp (newest first)
+      const sortedFolders = conversationFolders
+        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
       // Paginate
       const startIndex = (page - 1) * limit;
       const endIndex = startIndex + limit;
-      const paginatedFiles = sortedFiles.slice(startIndex, endIndex);
+      const paginatedFolders = sortedFolders.slice(startIndex, endIndex);
 
-      // Load conversation metadata (without full messages for performance)
+      // Load conversation metadata from each conversation folder
       const conversations = [];
-      for (const file of paginatedFiles) {
+      for (const folder of paginatedFolders) {
         try {
-          const conversationData = await megaService.downloadAsJSON(file.nodeId);
-          
-          // Return summary without full messages for list view
-          conversations.push({
-            id: conversationData.id,
-            title: conversationData.title,
-            modelId: conversationData.modelId,
-            createdAt: conversationData.createdAt,
-            updatedAt: conversationData.updatedAt,
-            lastMessageAt: conversationData.lastMessageAt,
-            messageCount: conversationData.messages?.length || 0,
-            totalTokens: conversationData.totalTokens || 0,
-            isActive: conversationData.isActive
-          });
+          // Get conversation data from the conversation folder
+          const conversationFiles = await megaService.listConversationFiles(userId, folder.conversationId);
+
+          if (conversationFiles.length > 0) {
+            const conversationFile = conversationFiles.find(file => file.name === 'conversation_data.json');
+
+            if (conversationFile) {
+              const conversationData = await megaService.downloadAsJSON(conversationFile.nodeId);
+
+              // Return summary without full messages for list view
+              conversations.push({
+                id: conversationData.id,
+                title: conversationData.title,
+                modelId: conversationData.modelId,
+                createdAt: conversationData.createdAt,
+                updatedAt: conversationData.updatedAt,
+                lastMessageAt: conversationData.lastMessageAt,
+                messageCount: conversationData.messages?.length || 0,
+                totalTokens: conversationData.totalTokens || 0,
+                isActive: conversationData.isActive,
+                folderPath: folder.folderPath
+              });
+            }
+          }
         } catch (error) {
           console.warn(`Failed to load conversation file ${file.name}:`, error.message);
         }
@@ -242,48 +307,148 @@ class MegaConversationService {
         }
       }
 
-      const fileName = `conversation_${conversationId}.json`;
-      const files = await megaService.listFiles(`user_${userId}/conversations`);
-      
-      const conversationFile = files.find(file => file.name === fileName);
-      if (!conversationFile) {
+      const fileName = `conversation_data.json`; // Standard filename for each conversation folder
+
+      // Check if Mega Drive is available
+      try {
+        const conversationFiles = await megaService.listConversationFiles(userId, conversationId);
+
+        const conversationFile = conversationFiles.find(file => file.name === fileName);
+        if (!conversationFile) {
+          console.log(`📁 Conversation file ${fileName} not found in Mega Drive`);
+          return null;
+        }
+
+        const conversationData = await megaService.downloadAsJSON(conversationFile.nodeId);
+        console.log(`📁 Successfully loaded conversation ${conversationId} from Mega Drive`);
+        return conversationData;
+      } catch (megaError) {
+        console.warn(`⚠️  Mega Drive access failed for conversation ${conversationId}:`, megaError.message);
+
+        // If Mega Drive is not available, check if we have a cached version
+        const cachedConv = this.conversationCache.get(conversationId);
+        if (cachedConv && cachedConv.userId === userId) {
+          console.log(`📋 Using cached conversation as fallback: ${conversationId}`);
+          return cachedConv;
+        }
+
         return null;
       }
-
-      const conversationData = await megaService.downloadAsJSON(conversationFile.nodeId);
-      return conversationData;
     } catch (error) {
-      console.warn(`Failed to load conversation ${conversationId} from Mega Drive:`, error.message);
+      console.warn(`Failed to load conversation ${conversationId}:`, error.message);
       return null;
     }
   }
 
   /**
-   * Save conversation to Mega Drive
+   * Save conversation to Mega Drive (update existing or create new)
    */
   async saveConversationToMega(conversation) {
     try {
-      const fileName = `conversation_${conversation.id}.json`;
+      const fileName = `conversation_data.json`; // Standard filename for each conversation folder
       const fileContent = JSON.stringify(conversation, null, 2);
       const fileBuffer = Buffer.from(fileContent, 'utf8');
-      
-      const megaFileId = await megaService.uploadBuffer(
+
+      // Check if conversation already has a megaFileId (existing file)
+      if (conversation.megaFileId) {
+        console.log(`🔄 Updating existing conversation file: ${fileName}`);
+
+        // Try to update the existing file in conversation folder
+        const updateResult = await megaService.updateConversationFile(
+          fileBuffer,
+          fileName,
+          conversation.userId,
+          conversation.id,
+          conversation.megaFileId
+        );
+
+        if (updateResult && updateResult.success) {
+          console.log(`✅ Successfully updated existing conversation: ${conversation.id}`);
+          return conversation.megaFileId;
+        } else {
+          console.warn(`⚠️  Failed to update existing file, creating new one`);
+          // Fall through to create new file
+        }
+      }
+
+      // Create new file (first time or update failed)
+      console.log(`📄 Creating new conversation file: ${fileName}`);
+      const uploadResult = await megaService.uploadToConversationFolder(
         fileBuffer,
         fileName,
-        `user_${conversation.userId}/conversations`
+        conversation.userId,
+        conversation.id
       );
 
-      if (megaFileId) {
-        conversation.megaFileId = megaFileId;
-        console.log(`✅ Conversation saved to Mega Drive: ${conversation.id}`);
+      if (uploadResult && uploadResult.success) {
+        conversation.megaFileId = uploadResult.nodeId;
+        conversation.folderPath = uploadResult.folderPath;
+
+        // Update public URL if generated
+        if (uploadResult.publicUrl) {
+          conversation.publicUrl = uploadResult.publicUrl;
+          console.log(`✅ Conversation saved to Mega Drive with public URL: ${conversation.id}`);
+        } else {
+          console.log(`✅ Conversation saved to Mega Drive: ${conversation.id}`);
+        }
+
+        // Log folder path information
+        if (uploadResult.fallback) {
+          console.log(`📁 Updated in: ${uploadResult.folderPath} (fallback mode)`);
+          if (uploadResult.warning) {
+            console.warn(`⚠️  ${uploadResult.warning}`);
+          }
+        } else {
+          console.log(`📁 Updated in: ${uploadResult.folderPath}`);
+        }
       } else {
         console.warn(`⚠️  Failed to save conversation ${conversation.id} to Mega Drive`);
       }
 
-      return megaFileId;
+      return conversation.megaFileId;
     } catch (error) {
       console.warn(`Failed to save conversation ${conversation.id} to Mega Drive:`, error.message);
       return null;
+    }
+  }
+
+  /**
+   * Generate or retrieve public URL for a conversation
+   */
+  async getConversationPublicUrl(conversationId, userId) {
+    try {
+      const conversation = await this.getConversation(conversationId, userId);
+
+      // If public URL already exists, return it
+      if (conversation.publicUrl) {
+        console.log(`🔗 Existing public URL: ${conversation.publicUrl}`);
+        return conversation.publicUrl;
+      }
+
+      // If no public URL but has megaFileId, try to generate one
+      if (conversation.megaFileId) {
+        try {
+          const publicUrl = await megaService.generatePublicLink(conversation.megaFileId);
+          if (publicUrl) {
+            conversation.publicUrl = publicUrl;
+
+            // Update the conversation with the new public URL
+            this.conversationCache.set(conversationId, conversation);
+            await this.saveConversationToMega(conversation);
+
+            console.log(`🔗 Generated new public URL: ${publicUrl}`);
+            return publicUrl;
+          }
+        } catch (error) {
+          console.warn('⚠️  Failed to generate public URL:', error.message);
+        }
+      }
+
+      console.warn('⚠️  No public URL available for conversation');
+      return null;
+    } catch (error) {
+      console.error('Error getting public URL:', error);
+      throw error;
     }
   }
 
